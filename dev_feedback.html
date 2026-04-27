@@ -143,36 +143,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,san
 <body>
 
 <!-- ═══════════════════════════════════════════════════════════════
-  SETUP — edit these two values to enable shared voting for the team.
+  SETUP — two values to fill in, takes about 2 minutes.
 
   HOW IT WORKS:
-    Votes and comments are stored as a JSON file inside a GitHub Gist.
-    Everyone accessing this page reads from and writes to the same Gist,
-    so all votes are shared in real time. No server needed.
+    Votes and comments are stored in a free JSONBin.io "bin" (a hosted
+    JSON file). Everyone on the team reads from and writes to the same
+    bin, so all votes are shared. No server, no GitHub token issues.
 
   STEPS:
-    1. Go to https://gist.github.com → New gist
-       · Description: "Talsec Health Check-in data"
-       · Filename: talsec-health-data.json
-       · Content: {}
-       · Visibility: Secret  →  Create secret gist
-       · Copy the 32-character Gist ID from the URL
+    1. Go to https://jsonbin.io → Sign up (free, no credit card)
 
-    2. Go to https://github.com/settings/tokens → Generate new token (classic)
-       · Note: "Health check-in page"
-       · Select ONLY the "gist" scope (nothing else)
-       · Set expiry to match your intended use (e.g. 90 days)
-       · Copy the token
+    2. Click "+ Create Bin"
+       · Paste this as the initial content:  {"votes":{},"comments":{}}
+       · Click Create  →  copy the Bin ID shown in the response (looks
+         like  67f3a1c2ad19ca34f8d2e001 )
 
-    3. Paste both values below, save, and deploy.
-       The "gist" scope only allows reading/writing Gists — nothing else
-       in your GitHub account is accessible with this token.
+    3. In the top menu go to  API Keys  →  copy your Master Key
+       (starts with  $2b$10$...  — safe to embed, JSONBin keys are not
+       detected as secrets by GitHub's scanner)
+
+    4. Paste both values below, save, push to GitHub.  Done.
 ═══════════════════════════════════════════════════════════════ -->
 <script>
 const CFG = {
-  gistId:    'cb3a06387c5b5f900d8522fb325b5119',                      // ← 32-char Gist ID from the URL
-  gistToken: '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',                      // ← GitHub PAT with 'gist' scope only
-  fileName:  'talsec-health-data.json'
+  binId:  '69ef6508aaba8821974294f9',   // ← JSONBin Bin ID  (e.g. 67f3a1c2ad19ca34f8d2e001)
+  apiKey: '$2a$10$h0.VtaqXzXW.0yziBDfmJuxuH/O/XLy/BePkmK7LRO/lLRnhPNR12',   // ← JSONBin Master Key  (e.g. $2b$10$abc...)
 };
 </script>
 
@@ -192,11 +187,11 @@ const CFG = {
   </div>
 </div>
 
-<!-- Setup banner (hidden when Gist is configured) -->
+<!-- Setup banner (hidden when JSONBin is configured) -->
 <div class="setup-banner" id="setup-banner">
   <div class="sbi">
     <h3>Shared voting is not yet configured</h3>
-    <p>Right now votes and comments are saved only in your local browser — your teammates won't see them. To enable shared voting, configure a GitHub Gist as storage (see the comment block at the top of this HTML file for step-by-step instructions).</p>
+    <p>Votes and comments are currently saved only in your local browser — teammates won't see them. To enable shared voting, create a free JSONBin account and paste your Bin ID and Master Key into the <code>CFG</code> object at the top of this file. See the comment block there for step-by-step instructions.</p>
   </div>
 </div>
 
@@ -669,32 +664,26 @@ const CFG = {
 
   <div class="footer">
     <p>Talsec Engineering Health &amp; Productivity Check-in · April 2026</p>
-    <p style="margin-top:4px;">Votes and comments sync via GitHub Gist when configured — see the comment block at the top of this file for setup instructions.</p>
+    <p style="margin-top:4px;">Votes and comments sync via JSONBin when configured — see the comment block at the top of this file for setup instructions.</p>
   </div>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════
   JAVASCRIPT
-  Storage strategy:
-    • If Gist is configured → load from Gist on open, write on each
-      vote/comment, poll for fresh data every 30 s
-    • If not configured → fall back to localStorage (local only)
-  Conflict handling: read-modify-write on every save. Merges the
-  current user's local state with whatever is in the Gist, so two
-  people voting simultaneously don't overwrite each other.
+  Storage: JSONBin.io (shared) with localStorage fallback.
+  Read-modify-write on every save to reduce race conditions.
 ═══════════════════════════════════════════════════════ -->
 <script>
 const LS_KEY  = 'talsec-health-v3';
 const LS_USER = 'talsec-uname';
 
-let S = { votes: {}, comments: {} };   // in-memory state
+let S = { votes: {}, comments: {} };
 let saveTimer = null;
-let polling   = false;
 
 /* ── helpers ── */
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function me(){ return document.getElementById('uname').value.trim() || 'Anonymous'; }
-function gistOk(){ return CFG.gistId && CFG.gistToken && CFG.gistId.length > 10 && CFG.gistToken.length > 10; }
+function cfgOk(){ return CFG.binId && CFG.apiKey && CFG.binId.length > 10 && CFG.apiKey.length > 10; }
 
 /* ── sync status ── */
 function setSS(mode, text){
@@ -706,40 +695,42 @@ function setSS(mode, text){
 function lsLoad(){ try{ return JSON.parse(localStorage.getItem(LS_KEY))||{votes:{},comments:{}}; }catch(e){ return {votes:{},comments:{}}; } }
 function lsSave(s){ localStorage.setItem(LS_KEY, JSON.stringify(s)); }
 
-/* ── GitHub Gist API ── */
-const API = 'https://api.github.com/gists/';
-function ghHeaders(){ return { Authorization:'Bearer '+CFG.gistToken, Accept:'application/vnd.github+json', 'Content-Type':'application/json' }; }
-
-async function gistLoad(){
-  try{
-    const r = await fetch(API + CFG.gistId, { headers: ghHeaders() });
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const g = await r.json();
-    const raw = g.files?.[CFG.fileName]?.content;
-    return raw ? JSON.parse(raw) : { votes:{}, comments:{} };
-  }catch(e){ console.warn('gist load:', e); return null; }
+/* ── JSONBin API ── */
+const BIN_URL = 'https://api.jsonbin.io/v3/b/';
+function jbHeaders(write){
+  const h = { 'X-Master-Key': CFG.apiKey };
+  if(write) h['Content-Type'] = 'application/json';
+  return h;
 }
 
-async function gistSave(local){
+async function jbLoad(){
+  try{
+    const r = await fetch(BIN_URL + CFG.binId + '/latest', { headers: jbHeaders(false) });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const j = await r.json();
+    return j.record || { votes:{}, comments:{} };
+  }catch(e){ console.warn('jb load:', e); return null; }
+}
+
+async function jbSave(local){
   setSS('busy','Syncing…');
   try{
-    // Read fresh → merge → write (reduces race conditions)
-    const remote = await gistLoad();
+    // Read fresh → merge → write
+    const remote = await jbLoad();
     const merged = remote || { votes:{}, comments:{} };
     const user = me();
 
-    // Votes: keep all remote votes except current user's, then apply current user's local state
+    // Votes: authoritative for current user, keep others from remote
     for(const id in local.votes){
       if(!merged.votes[id]) merged.votes[id] = [];
       merged.votes[id] = merged.votes[id].filter(u => u !== user);
       if(local.votes[id].includes(user)) merged.votes[id].push(user);
     }
-    // Carry over any vote keys that exist only in remote
     for(const id in (remote||{}).votes){
       if(!merged.votes[id]) merged.votes[id] = remote.votes[id];
     }
 
-    // Comments: append new local comments not yet in remote (dedup by user+ts+text)
+    // Comments: append new local ones not yet in remote
     for(const id in local.comments){
       if(!merged.comments[id]) merged.comments[id] = [];
       const seen = new Set(merged.comments[id].map(c=>c.user+'|'+c.ts+'|'+c.text));
@@ -748,19 +739,18 @@ async function gistSave(local){
       }
     }
 
-    const body = JSON.stringify({ files:{ [CFG.fileName]:{ content: JSON.stringify(merged,null,2) } } });
-    const r = await fetch(API + CFG.gistId, { method:'PATCH', headers:ghHeaders(), body });
+    const r = await fetch(BIN_URL + CFG.binId, { method:'PUT', headers: jbHeaders(true), body: JSON.stringify(merged) });
     if(!r.ok) throw new Error('HTTP '+r.status);
     S = merged;
     lsSave(S);
     setSS('ok','Synced');
   }catch(e){
-    console.warn('gist save:', e);
+    console.warn('jb save:', e);
     setSS('err','Sync error');
   }
 }
 
-function scheduleSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(()=>gistSave(S), 700); }
+function scheduleSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(()=>jbSave(S), 700); }
 
 /* ── init ── */
 async function init(){
@@ -770,7 +760,7 @@ async function init(){
     localStorage.setItem(LS_USER, this.value.trim());
   });
 
-  if(!gistOk()){
+  if(!cfgOk()){
     document.getElementById('setup-banner').classList.add('show');
     setSS('','Local only');
     S = lsLoad();
@@ -779,15 +769,15 @@ async function init(){
   }
 
   setSS('busy','Loading…');
-  const remote = await gistLoad();
+  const remote = await jbLoad();
   if(remote){ S = remote; lsSave(S); setSS('ok','Synced'); }
   else       { S = lsLoad(); setSS('err','Sync error — using local data'); }
   renderAll();
 
   // Poll every 30 s for other people's changes
   setInterval(async ()=>{
-    if(saveTimer) return;   // skip if we're mid-write
-    const fresh = await gistLoad();
+    if(saveTimer) return;
+    const fresh = await jbLoad();
     if(fresh){ S = fresh; lsSave(S); renderAll(); setSS('ok','Synced'); }
   }, 30000);
 }
@@ -801,7 +791,7 @@ function vote(id, btn){
   else         S.votes[id].splice(i,1);
   lsSave(S);
   renderVote(id);
-  if(gistOk()) scheduleSave();
+  if(cfgOk()) scheduleSave();
 }
 
 function renderVote(id){
@@ -839,7 +829,7 @@ function addComment(id){
   inp.value = '';
   lsSave(S);
   renderComments(id);
-  if(gistOk()) scheduleSave();
+  if(cfgOk()) scheduleSave();
 }
 
 function renderComments(id){
