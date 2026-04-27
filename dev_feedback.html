@@ -166,8 +166,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,san
 ═══════════════════════════════════════════════════════════════ -->
 <script>
 const CFG = {
-  binId:  '69ef6508aaba8821974294f9',   // ← JSONBin Bin ID  (e.g. 67f3a1c2ad19ca34f8d2e001)
-  apiKey: '$2a$10$h0.VtaqXzXW.0yziBDfmJuxuH/O/XLy/BePkmK7LRO/lLRnhPNR12',   // ← JSONBin Master Key  (e.g. $2b$10$abc...)
+  binId:  '69ef6508aaba8821974294f9',
+  apiKey: '$2a$10$h0.VtaqXzXW.0yziBDfmJuxuH/O/XLy/BePkmK7LRO/lLRnhPNR12',
 };
 </script>
 
@@ -199,8 +199,8 @@ const CFG = {
 <div class="namebar">
   <div class="nbi">
     <label for="uname">Your name:</label>
-    <input id="uname" type="text" placeholder="Anonymous" maxlength="30" autocomplete="off">
-    <span class="hint">Used for votes &amp; comments — saved in your browser</span>
+    <input id="uname" type="text" placeholder="Leave blank for auto-name" maxlength="30" autocomplete="off">
+    <span class="hint">Each browser is uniquely identified — your votes are yours even without a name</span>
   </div>
 </div>
 
@@ -682,8 +682,24 @@ let saveTimer = null;
 
 /* ── helpers ── */
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function me(){ return document.getElementById('uname').value.trim() || 'Anonymous'; }
 function cfgOk(){ return CFG.binId && CFG.apiKey && CFG.binId.length > 10 && CFG.apiKey.length > 10; }
+
+/* ── persistent browser identity ──────────────────────────────────────
+   Each browser gets a random UID on first visit, stored in localStorage.
+   Votes are keyed by UID — so "Anonymous" from two different browsers
+   are always separate people and can't overwrite each other's votes.
+   The display name is just a label; UID is the real identity.
+─────────────────────────────────────────────────────────────────────── */
+function getMyUid(){
+  let uid = localStorage.getItem('talsec-uid');
+  if(!uid){
+    uid = 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+    localStorage.setItem('talsec-uid', uid);
+  }
+  return uid;
+}
+/* Display name: what the user typed, or a unique "Anon-XXXX" fallback */
+function me(){ return document.getElementById('uname').value.trim() || ('Anon-' + getMyUid().slice(-4)); }
 
 /* ── sync status ── */
 function setSS(mode, text){
@@ -717,25 +733,37 @@ async function jbSave(local){
   try{
     // Read fresh → merge → write
     const remote = await jbLoad();
-    const merged = remote || { votes:{}, comments:{} };
-    const user = me();
+    const merged = { votes:{}, comments:{} };
+    const myUid  = getMyUid();
 
-    // Votes: authoritative for current user, keep others from remote
-    for(const id in local.votes){
-      if(!merged.votes[id]) merged.votes[id] = [];
-      merged.votes[id] = merged.votes[id].filter(u => u !== user);
-      if(local.votes[id].includes(user)) merged.votes[id].push(user);
-    }
-    for(const id in (remote||{}).votes){
-      if(!merged.votes[id]) merged.votes[id] = remote.votes[id];
+    // ── Votes ──────────────────────────────────────────────────────────
+    // votes[itemId] is an object { uid: displayName }.
+    // Merge rule: copy ALL remote entries, then override only myUid's
+    // entry with local state (this browser is authoritative for itself).
+    const allVoteIds = new Set([
+      ...Object.keys(local.votes  || {}),
+      ...Object.keys((remote||{}).votes || {})
+    ]);
+    for(const id of allVoteIds){
+      merged.votes[id] = { ...((remote||{}).votes?.[id] || {}) };
+      if(local.votes?.[id]?.[myUid]){
+        merged.votes[id][myUid] = local.votes[id][myUid]; // I voted
+      } else {
+        delete merged.votes[id][myUid];                   // I unvoted
+      }
     }
 
-    // Comments: append new local ones not yet in remote
-    for(const id in local.comments){
-      if(!merged.comments[id]) merged.comments[id] = [];
-      const seen = new Set(merged.comments[id].map(c=>c.user+'|'+c.ts+'|'+c.text));
-      for(const c of local.comments[id]){
-        if(!seen.has(c.user+'|'+c.ts+'|'+c.text)) merged.comments[id].push(c);
+    // ── Comments ───────────────────────────────────────────────────────
+    // Append local comments not yet in remote (dedup by uid+ts+text).
+    const allCids = new Set([
+      ...Object.keys(local.comments || {}),
+      ...Object.keys((remote||{}).comments || {})
+    ]);
+    for(const id of allCids){
+      merged.comments[id] = [...((remote||{}).comments?.[id] || [])];
+      const seen = new Set(merged.comments[id].map(c=>c.uid+'|'+c.ts+'|'+c.text));
+      for(const c of (local.comments?.[id] || [])){
+        if(!seen.has(c.uid+'|'+c.ts+'|'+c.text)) merged.comments[id].push(c);
       }
     }
 
@@ -784,21 +812,24 @@ async function init(){
 
 /* ── voting ── */
 function vote(id, btn){
-  const user = me();
-  if(!S.votes[id]) S.votes[id] = [];
-  const i = S.votes[id].indexOf(user);
-  if(i === -1) S.votes[id].push(user);
-  else         S.votes[id].splice(i,1);
+  const myUid = getMyUid();
+  if(!S.votes[id]) S.votes[id] = {};
+  if(S.votes[id][myUid]){
+    delete S.votes[id][myUid];        // toggle off
+  } else {
+    S.votes[id][myUid] = me();        // toggle on — store display name
+  }
   lsSave(S);
   renderVote(id);
   if(cfgOk()) scheduleSave();
 }
 
 function renderVote(id){
-  const user  = me();
-  const voters = S.votes[id] || [];
-  const count  = voters.length;
-  const voted  = voters.includes(user);
+  const myUid  = getMyUid();
+  const voters = S.votes[id] || {};                       // { uid: name }
+  const entries = Object.entries(voters);                 // [[uid, name], ...]
+  const count  = entries.length;
+  const voted  = myUid in voters;
 
   document.querySelectorAll('.btn-vote[data-id="'+id+'"]').forEach(b=>{
     b.classList.toggle('active', voted);
@@ -807,7 +838,7 @@ function renderVote(id){
 
   document.querySelectorAll('.ap-who[data-id="'+id+'"]').forEach(el=>{
     if(!count){ el.textContent=''; return; }
-    const others = voters.filter(u=>u!==user);
+    const others = entries.filter(([u])=>u!==myUid).map(([,n])=>n||'Anon');
     let parts = voted ? ['you'] : [];
     parts = parts.concat(others.slice(0,3));
     if(others.length > 3) parts.push('+'+(others.length-3)+' more');
@@ -825,7 +856,7 @@ function addComment(id){
   const txt = inp.value.trim();
   if(!txt) return;
   if(!S.comments[id]) S.comments[id] = [];
-  S.comments[id].push({ user:me(), text:txt, ts:new Date().toISOString().slice(0,10) });
+  S.comments[id].push({ uid:getMyUid(), user:me(), text:txt, ts:new Date().toISOString().slice(0,10) });
   inp.value = '';
   lsSave(S);
   renderComments(id);
